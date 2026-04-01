@@ -1,162 +1,106 @@
 import axios from "axios";
-import { ElMessageBox, ElNotification, ElMessage } from "element-plus";
-import { getToken } from "@/utils/auth";
-import errorCode from "@/utils/errorCode";
-import { tansParams } from "@/utils/snpit";
-import cache from "@/utils/cache";
-import { saveAs } from "file-saver";
-let downloadLoadingInstance;
-// 是否显示重新登录
-export let isReLogin = { show: false };
+import type { AxiosResponse } from "axios";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { getToken, removeToken } from "@/utils/token";
+import { saveBlob, getFilename } from "@/utils/download";
 
-axios.defaults.headers["Content-Type"] = "application/json;charset=utf-8";
-// 创建axios实例
+interface ApiResponse<T = any> {
+  code: number;
+  msg: string;
+  data: T;
+}
+
+let isExpired = false;
+
 const service = axios.create({
-  // axios中请求配置有baseURL选项，表示请求URL公共部分
-  baseURL: "/api",
-  // 超时
-  timeout: 60000,
+  baseURL: import.meta.env.VITE_API_BASE_URL,
+  timeout: 10000,
 });
-// request拦截器
+
+// ================= 请求拦截 =================
 service.interceptors.request.use(
   (config) => {
-    // ajax请求标识
-    config.headers["X-Requested-With"] = "XMLHttpRequest";
+    const token = getToken();
 
-    // 是否需要token
-    const isToken = config.headers?.isToken === false;
-
-    if (getToken() && !isToken) {
-      config.headers["Authorization"] = "Bearer " + getToken();
-    }
-
-    // 防重复提交
-    const isRepeatSubmit = config.headers?.repeatSubmit === false;
-
-    if (!isRepeatSubmit && ["post", "put"].includes(config.method)) {
-      const requestKey =
-        config.url + JSON.stringify(config.data || config.params);
-
-      const lastRequest = sessionStorage.getItem("lastRequest");
-
-      if (lastRequest === requestKey) {
-        return Promise.reject(new Error("请求重复提交"));
-      }
-
-      sessionStorage.setItem("lastRequest", requestKey);
-
-      setTimeout(() => {
-        sessionStorage.removeItem("lastRequest");
-      }, 1000);
+    if (token && config.headers?.isToken !== false) {
+      config.headers.Authorization = `Bearer ${token}`;
     }
 
     return config;
   },
+  (error) => Promise.reject(error),
+);
+
+// ================= 响应拦截 =================
+service.interceptors.response.use(
+  (res: AxiosResponse) => {
+    const { data, headers, config } = res;
+
+    // ===== 下载处理 =====
+    if (config.responseType === "blob") {
+      if (headers["content-type"]?.includes("application/json")) {
+        return Promise.reject("下载失败");
+      }
+
+      saveBlob(data, getFilename(headers));
+      return data;
+    }
+
+    const response = data as ApiResponse;
+
+    const code = response?.code ?? 200;
+    const msg = response?.msg || "请求失败";
+
+    if (code === 200) {
+      return response.data; // ⭐ 返回 T
+    }
+
+    if (code === 401) {
+      if (!isExpired) {
+        isExpired = true;
+
+        ElMessageBox.confirm("登录已失效，请重新进入系统", "提示", {
+          type: "warning",
+          showCancelButton: false,
+        }).then(() => {
+          removeToken();
+          window.history.back();
+        });
+      }
+
+      return Promise.reject(msg);
+    }
+
+    ElMessage.error(msg);
+    return Promise.reject(msg);
+  },
+
   (error) => {
-    return Promise.reject(error);
+    let msg = "请求失败";
+
+    if (error.response) {
+      const status = error.response.status;
+
+      const map: Record<number, string> = {
+        401: "未授权",
+        403: "拒绝访问",
+        404: "请求地址不存在",
+        500: "服务器错误",
+      };
+
+      msg = map[status] || `请求失败(${status})`;
+    } else if (error.message?.includes("timeout")) {
+      msg = "请求超时";
+    }
+
+    ElMessage.error(msg);
+    return Promise.reject(msg);
   },
 );
 
-// 响应拦截器
-service.interceptors.response.use(
-  (res) => {
-    // 未设置状态码则默认成功状态
-    const code = res.status == 200 ? res.data.code : res.status || 200;
-    // 获取错误信息
-    const msg = errorCode[code] || res.data.msg || errorCode["default"];
-    // 二进制数据则直接返回
-    if (
-      res.request.responseType === "blob" ||
-      res.request.responseType === "arraybuffer"
-    ) {
-      return res.data;
-    }
-    if (code === 401 || code === 302) {
-      if (!isReLogin.show) {
-        isReLogin.show = true;
-        ElMessageBox.confirm(
-          "登录状态已过期，您可以继续留在该页面，或者重新登录",
-          "系统提示",
-          {
-            confirmButtonText: "重新登录",
-            cancelButtonText: "取消",
-            type: "warning",
-            center: false,
-          },
-        )
-          .then(() => {
-            isReLogin.show = false;
-            // location.href = "http://gateway.dev.snpit.com:8080/smartsite/oauth/login"
-            // location.href = "http://127.0.0.1:8080/smartsite/oauth/login"
-            // location.href = window.dynamicConfig.loginUrl;
-            if (
-              window.location.hostname.startsWith(window.dynamicConfig.agentIP)
-            ) {
-              location.href = window.dynamicConfig.loginUrlAgent;
-            } else {
-              location.href = window.dynamicConfig.loginUrl;
-            }
-            // location.href = "http://10.191.2.109:9309/smartsite/oauth/login"
-          })
-          .catch(() => {
-            isReLogin.show = false;
-          });
-      }
-      return Promise.reject("无效的会话，或者会话已过期，请重新登录。");
-    } else if (code === 500) {
-      ElMessage({
-        ElMessage: msg,
-        type: "error",
-      });
-      return Promise.reject(new Error(msg));
-    } else if (code !== 200) {
-      ElNotification.error({
-        title: msg,
-      });
-      return Promise.reject("error");
-    } else {
-      return res.data;
-    }
-  },
-  (error) => {
-    let { ElMessage } = error;
-    if (ElMessage == "Network Error") {
-      ElMessage = "后端接口连接异常";
-    } else if (ElMessage.includes("timeout")) {
-      ElMessage = "系统接口请求超时";
-    } else if (ElMessage.includes("Request failed with status code")) {
-      ElMessage = "系统接口" + ElMessage.substr(ElMessage.length - 3) + "异常";
-    }
-    ElMessage({
-      ElMessage: ElMessage,
-      type: "error",
-      duration: 5 * 1000,
-    });
-    return Promise.reject(error);
-  },
-);
-// 通用下载方法
-export function download(url, params, filename) {
-  ElMessage({
-    ElMessage: "正在导出,请稍后查看",
-    type: "success",
-    duration: 3 * 1000,
-  });
-  // downloadLoadingInstance = Loading.service({ text: "正在下载数据，请稍候", spinner: "el-icon-loading", background: "rgba(0, 0, 0, 0.7)", })
-  return service({
-    method: "post",
-    url: "/" + url,
-    responseType: "blob",
-    data: params,
-  })
-    .then(async (data) => {
-      const blob = new Blob([data]);
-      saveAs(blob, filename);
-      // downloadLoadingInstance.close();
-    })
-    .catch((r) => {
-      ElMessage.error("下载文件出现错误，请联系管理员！");
-      downloadLoadingInstance.close();
-    });
+// ⭐ 泛型 request（核心）
+export function request<T = any>(config): Promise<T> {
+  return service(config);
 }
-export default service;
+
+export default request;

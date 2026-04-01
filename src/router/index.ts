@@ -4,7 +4,7 @@ import Layout from "@/layout/index.vue";
 import NProgress from "nprogress";
 import "nprogress/nprogress.css";
 
-import { getToken, setToken } from "@/utils/auth";
+import { getToken, setToken } from "@/utils/token";
 
 NProgress.configure({ showSpinner: false });
 
@@ -31,27 +31,26 @@ const router = createRouter({
 });
 
 // 路由守卫
-router.beforeEach(async (to, from, next) => {
+router.beforeEach(async (to, from) => {
   NProgress.start();
-  next();
-  // // 单点登录 token
-  // if (to.query.access_token) {
-  //   setToken(to.query.access_token);
-  //   window.location.href = "/";
-  //   return;
-  // }
-  // // 已登录
-  // if (getToken()) {
-  //   next();
-  // } else {
-  //   // 未登录
-  //   if (whiteList.includes(to.path)) {
-  //     next();
-  //   } else {
-  //     // 关闭当前页面
-  //     history.back();
-  //   }
-  // }
+
+  // 单点登录 token
+  if (to.query.access_token) {
+    setToken(to.query.access_token);
+    return "/";
+  }
+
+  // 已登录
+  if (getToken()) {
+    return true;
+  }
+
+  // 未登录
+  if (whiteList.includes(to.path)) {
+    return true;
+  }
+
+  return false;
 });
 
 router.afterEach(() => {
